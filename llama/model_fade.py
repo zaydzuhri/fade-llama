@@ -66,11 +66,14 @@ def apply_rotary_emb(
     xk: torch.Tensor,
     freqs_cis: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    xq_freqs_cis = freqs_cis[-xq.shape[1]:, :]
+    xk_freqs_cis = freqs_cis[-xk.shape[1]:, :]
     xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
     xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
-    freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
-    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
-    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
+    xq_freqs_cis = reshape_for_broadcast(xq_freqs_cis, xq_)
+    xk_freqs_cis = reshape_for_broadcast(xk_freqs_cis, xk_)
+    xq_out = torch.view_as_real(xq_ * xq_freqs_cis).flatten(3)
+    xk_out = torch.view_as_real(xk_ * xk_freqs_cis).flatten(3)
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
@@ -178,10 +181,11 @@ class Attention(nn.Module):
         values = values.transpose(1, 2)
         scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
         if mask is not None:
+            mask = mask[:, :, -T_q:, -seqlen:]
             scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
         scores = F.softmax(scores.float(), dim=-1).type_as(xq)
         output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
-        output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
+        output = output.transpose(1, 2).contiguous().view(bsz, T_q, -1)
         return self.wo(output)
 
 
@@ -238,14 +242,13 @@ class TransformerBlock(nn.Module):
         freqs_cis: torch.Tensor,
         mask: Optional[torch.Tensor],
     ):
-        og = x
-        freqs_cis = freqs_cis[-x.shape[1]:, :]
+        # og = x
         a = self.attention.forward(
             self.attention_norm(x), start_pos, freqs_cis, mask
         )
         h = x[:, -a.shape[1]:, :] + a
         out = h + self.feed_forward.forward(self.ffn_norm(h))
-        out = torch.cat([og[:, :-out.shape[1], :], out], dim=1)
+        # out = torch.cat([og[:, :-out.shape[1], :], out], dim=1)
         return out
 
 
@@ -256,7 +259,10 @@ class Transformer(nn.Module):
         self.vocab_size = params.vocab_size
         self.n_layers = params.n_layers
         # define fading pattern
-        fades = [params.max_seq_len // (2 ** i) for i in range(params.n_layers)]
+        n_fade = 4
+        fades = [params.max_seq_len // (2 ** i) for i in range(n_fade)]
+        fades = fades + [params.max_seq_len // (2 ** (n_fade-1))] * (params.n_layers - n_fade)
+        print(f"fade pattern: {fades}")
         assert len(fades) == params.n_layers, "fade pattern must match n_layers"
 
         self.tok_embeddings = ParallelEmbedding(

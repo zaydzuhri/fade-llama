@@ -1,8 +1,6 @@
 import os
-import tiktoken
 import numpy as np
 from datasets import load_dataset
-from tqdm import tqdm
 import csv
 import sys
 sys.path.append(os.path.abspath(os.path.join('../../', 'llama')))
@@ -19,7 +17,7 @@ print("sample: ", data[:1000])
 n = len(data)
 # encode with llama tokenizer
 print("encoding with llama tokenizer...")
-tokenizer = Tokenizer(model_path='../../model/7B')
+tokenizer = Tokenizer(model_path='../../tokenizer.model')
 test_ids = tokenizer.encode(data, eos=False, bos=False)
 print(f"test has {len(test_ids):,} tokens")
 

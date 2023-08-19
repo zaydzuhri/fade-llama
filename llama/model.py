@@ -14,7 +14,11 @@ from fairscale.nn.model_parallel.layers import (
     RowParallelLinear,
 )
 from torch import nn
+import pickle
 
+log = False
+if log:
+    log_file = open('attention_log.pkl', 'wb')
 
 @dataclass
 class ModelArgs:
@@ -178,6 +182,10 @@ class Attention(nn.Module):
         if mask is not None:
             scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
         scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+
+        if log:
+            pickle.dump({'start_pos': start_pos, 'att_matrix': scores}, log_file)
+
         output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
         return self.wo(output)
