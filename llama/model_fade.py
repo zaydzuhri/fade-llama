@@ -152,12 +152,15 @@ class Attention(nn.Module):
         start_pos: int,
         freqs_cis: torch.Tensor,
         mask: Optional[torch.Tensor],
+        init_seqlen: int,
     ):
         bsz, seqlen, _ = x.shape
-        T_q = min(seqlen, self.T_fade)
-        xq, xk, xv = self.wq(x[:, -T_q:]), self.wk(x), self.wv(x)
+        # T_q = min(seqlen, self.T_fade)
+        # xq, xk, xv = self.wq(x[:, -T_q:]), self.wk(x), self.wv(x)
+        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
-        xq = xq.view(bsz, T_q, self.n_local_heads, self.head_dim)
+        # xq = xq.view(bsz, T_q, self.n_local_heads, self.head_dim)
+        xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
         xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
         xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
 
@@ -166,11 +169,24 @@ class Attention(nn.Module):
         self.cache_k = self.cache_k.to(xq)
         self.cache_v = self.cache_v.to(xq)
 
-        self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
-        self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
-
-        keys = self.cache_k[:bsz, : start_pos + seqlen]
-        values = self.cache_v[:bsz, : start_pos + seqlen]
+        if init_seqlen == 1:
+            fade_start = max(0, (start_pos + seqlen) - self.T_fade)
+            # print(f'fill from {start_pos} to {start_pos + seqlen}')
+            self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
+            self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
+            # print(f'get from {fade_start} to {start_pos + seqlen}')
+            keys = self.cache_k[:bsz, fade_start : start_pos + seqlen]
+            values = self.cache_v[:bsz, fade_start : start_pos + seqlen]
+        else:
+            fade_start = max(0, init_seqlen - self.T_fade)
+            # print('starting run')
+            # print(f'fill from {fade_start} to {init_seqlen}')
+            self.cache_k[:bsz, fade_start : init_seqlen] = xk
+            self.cache_v[:bsz, fade_start : init_seqlen] = xv
+            # print(f'get from {fade_start} to {init_seqlen}')
+            keys = self.cache_k[:bsz, fade_start : init_seqlen]
+            values = self.cache_v[:bsz, fade_start : init_seqlen]
+        # print('keys.shape', keys.shape)
 
         # repeat k/v heads if n_kv_heads < n_heads
         keys = repeat_kv(keys, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
@@ -179,13 +195,20 @@ class Attention(nn.Module):
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         keys = keys.transpose(1, 2)
         values = values.transpose(1, 2)
+        # print('xq.sample', xq[0, 0, -1, -3:])
+        # print('keys.sample', keys[0, 0, -1, -3:])
+        # print('values.sample', values[0, 0, -1, -3:])
         scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
         if mask is not None:
-            mask = mask[:, :, -T_q:, -seqlen:]
+            mask = mask[:, :, -seqlen:, -seqlen:]
+            # print('mask.sample', mask[0, 0, -3:, -3:])
             scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
         scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+        # print('scores.sample', scores[0, 0, -1, -3:])
         output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
-        output = output.transpose(1, 2).contiguous().view(bsz, T_q, -1)
+        # output = output.transpose(1, 2).contiguous().view(bsz, T_q, -1)
+        output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
+        # print('output.sample', output[0, -1, -3:])
         return self.wo(output)
 
 
@@ -241,12 +264,19 @@ class TransformerBlock(nn.Module):
         start_pos: int,
         freqs_cis: torch.Tensor,
         mask: Optional[torch.Tensor],
+        init_seqlen: int,
     ):
         # og = x
-        a = self.attention.forward(
-            self.attention_norm(x), start_pos, freqs_cis, mask
+        # print('--------layer_id', self.layer_id, "x.shape", x.shape)
+        x = x[:, -self.attention.T_fade:, :]
+        freqs_cis = freqs_cis[-self.attention.T_fade:, :]
+        # a = self.attention.forward(
+        #     self.attention_norm(x), start_pos, freqs_cis, mask
+        # )
+        # h = x[:, -a.shape[1]:, :] + a
+        h = x + self.attention.forward(
+            self.attention_norm(x), start_pos, freqs_cis, mask, init_seqlen
         )
-        h = x[:, -a.shape[1]:, :] + a
         out = h + self.feed_forward.forward(self.ffn_norm(h))
         # out = torch.cat([og[:, :-out.shape[1], :], out], dim=1)
         return out
@@ -297,7 +327,7 @@ class Transformer(nn.Module):
             mask = torch.triu(mask, diagonal=start_pos + 1).type_as(h)
 
         for layer in self.layers:
-            h = layer(h, start_pos, freqs_cis, mask)
+            h = layer(h, start_pos, freqs_cis, mask, seqlen)
         h = self.norm(h)
         output = self.output(h).float()
         return output
