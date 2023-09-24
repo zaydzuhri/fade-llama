@@ -3,4 +3,5 @@
 
 from .generation import Llama
 from .model import ModelArgs, Transformer
+from .model_mlkv import TransformerMLKV
 from .tokenizer import Tokenizer
